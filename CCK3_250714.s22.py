@@ -41,23 +41,160 @@ import time         # to measure scan duration
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
-PortRange = tuple[int, int]
+import sys
+if sys.version_info < (3, 10):
+    print("[!] Python 3.10+ required.", flush=True)
+    raise SystemExit(1)
 
-port_range_pattern = re.compile(r"^\s*([0-9]+)\s*-\s*([0-9]+)\s*$")
+single_or_range = re.compile(r"^\s*(\d+)\s*(?:-\s*(\d+)\s*)?$")
 
-COMMON_TCP_PORTS: tuple[int, ...] = (80, 443, 22, 8000)
+BANNER_TIMEOUT = 5.0
+TCP_CONNECT_TIMEOUT = 0.5
+UDP_TIMEOUT = 1.0
 
-USE_THREADS: bool = True
+HTTP_BANNER_PORTS = (80, 8080, 8000)
+
+COMMON_TCP_PORTS: tuple[int, ...] = (80, 443, 22, 8080, 8000, 3389)
+MAX_HOSTS: int = 4096
 MAX_WORKERS: int = 100
 
 
+def ask(prompt: str) -> str:
+    try:
+        return input(prompt)
+    except EOFError:
+        print("\n[!] No input available. Exiting.", flush=True)
+        raise SystemExit(1)
+
+
+def prompt_discovery_block() -> str | None:
+    """
+    Ask for an IP or CIDR. Blank (ENTER/whitespace) returns None to skip discovery.
+    Otherwise, keep prompting until a valid (and not-too-large) network is entered.
+    """
+    while True:
+        block = ask(
+            "Enter IP or CIDR (e.g., '127.0.0.1' or '192.168.1.0/30') [ENTER to skip]: ").strip()
+        if not block:
+            return None
+        try:
+            # Validate format
+            net = ipaddress.ip_network(block, strict=False)
+            if net.version != 4:
+                print(
+                    "[!] IPv6 networks are not supported. Enter an IPv4 network, or press ENTER to skip.", flush=True)
+                continue
+            if net.num_addresses > MAX_HOSTS + 2:  # +2 includes network/broadcast
+                print(f"[!] Network too large ({net.num_addresses} addresses). "
+                      f"Max is {MAX_HOSTS}. Try a smaller block, or press ENTER to skip.", flush=True)
+                continue
+            return block
+        except ValueError as err:
+            print(f"[!] {err}. Try again, or press ENTER to skip.", flush=True)
+
+
+def prompt_target_ip() -> tuple[str, str | None]:
+    """
+    Prompt for IP/hostname until valid.
+    Returns (target_ip, target_name) where target_name is the original hostname
+    if the user entered a hostname; otherwise None.
+    """
+    while True:
+        user_target = ask("Enter target (IP or hostname): ").strip()
+        try:
+            target_ip = resolve_target(user_target)
+            print(f"Target resolved to: {target_ip}", flush=True)
+            # If original input was an IP, leave name as None; else keep hostname
+            try:
+                ipaddress.ip_address(user_target)
+                target_name = None
+            except ValueError:
+                target_name = user_target
+            return target_ip, target_name
+        except ValueError as err:
+            print(f"[!] {err}. Try again.", flush=True)
+
+
+def prompt_port_range() -> tuple[int, int]:
+    while True:
+        s = ask("Enter port or range (e.g., 443 or 60-120): ").strip()
+        try:
+            return parse_port_range(s)
+        except ValueError as err:
+            print(f"[!] {err}. Try again.", flush=True)
+
+
+def prompt_mode() -> str:
+    while True:
+        mode = ask("Scan mode (tcp/udp): ").strip().lower()
+        if mode in ("tcp", "udp"):
+            return mode
+        print("[!] Please enter 'tcp' or 'udp'. Try again.", flush=True)
+
+
+def prompt_threads(port_count: int) -> tuple[bool, int]:
+    use_threads = ask("Use threads? (y/n): ").strip().lower().startswith("y")
+    workers = MAX_WORKERS
+    if use_threads:
+        while True:
+            workers_in = ask(
+                f"Workers (press ENTER for default {MAX_WORKERS}): ").strip()
+            if not workers_in:
+                workers = MAX_WORKERS
+                break
+            try:
+                w = int(workers_in)
+                if w > 0:
+                    if w > port_count:
+                        print(f"[*] Note: only {port_count} ports to scan; "
+                              f"effective workers will be {port_count}.", flush=True)
+                    workers = w
+                    break
+            except ValueError:
+                pass
+            print("[!] Invalid worker count. Enter a positive integer.", flush=True)
+    return use_threads, workers
+
+
+def select_hosts(live: list[str], already_done: set[str]) -> list[str]:
+    remaining = [ip for ip in live if ip not in already_done]
+    if not remaining:
+        print("[*] No remaining hosts to select.", flush=True)
+        return []
+    print("[*] Live hosts (remaining): ", flush=True)
+    for i, ip in enumerate(remaining, 1):
+        print(f"  {i}. {ip}", flush=True)
+    while True:
+        sel = ask(
+            f"Select one or more hosts (e.g., 1,3,2) from 1-{len(remaining)}: ").strip()
+        parts = [p.strip() for p in sel.split(",") if p.strip()]
+        try:
+            idxs = [int(p) for p in parts]
+            if not idxs:
+                raise ValueError
+            if any(i < 1 or i > len(remaining) for i in idxs):
+                raise ValueError
+            order: list[str] = []
+            seen: set[str] = set()
+            for idx in idxs:
+                ip = remaining[idx - 1]
+                if ip not in seen:
+                    order.append(ip)
+                    seen.add(ip)
+            return order
+        except ValueError:
+            print("[!] Invalid selection. Try again.", flush=True)
+
+
 def parse_port_range(s: str) -> tuple[int, int]:
-    m = port_range_pattern.match(s)
+    m = single_or_range.match(s)
     if not m:
-        raise ValueError("Use format low-high, e.g. 60-120")
-    low, high = int(m.group(1)), int(m.group(2))
-    if not (0 <= low <= 65535 and 0 <= high <= 65535 and low <= high):
-        raise ValueError("Ports must be 0–65535 and low <= high.")
+        raise ValueError(
+            "Use 'low-high' (e.g., 60-120) or a single port (e.g., 443)")
+    low = int(m.group(1))
+    high = int(m.group(2)) if m.group(2) else low
+    if not (1 <= low <= 65535 and 1 <= high <= 65535 and low <= high):
+        raise ValueError("Ports must be 1–65535 and low <= high.")
     return low, high
 
 
@@ -65,10 +202,16 @@ def resolve_target(user_input: str) -> str:
     """Return an IPv4 address string from either an IP or a hostname."""
     # 1) If it is already a valid IP, just use it.
     try:
-        ipaddress.ip_address(user_input)  # raises ValueError if not a valid IP
-        return user_input
+        # raises ValueError if not a valid IP
+        ip = ipaddress.ip_address(user_input)
     except ValueError:
-        pass
+        ip = None
+
+    if ip is not None:
+        if ip.version != 4:
+            raise ValueError(
+                "IPv6 addresses are not supported by this scanner.")
+        return str(ip)
 
     # 2) Otherwise, resolve hostname to IPv4
     try:
@@ -79,7 +222,7 @@ def resolve_target(user_input: str) -> str:
             "Could not resolve hostname to an IPv4 address.") from e
 
 
-def scan_tcp_once(target_ip: str, port: int, *, timeout: float = 0.5) -> bool:
+def scan_tcp_once(target_ip: str, port: int, *, timeout: float = TCP_CONNECT_TIMEOUT) -> bool:
     # AF_INET: IPv4; SOCK_STREAM: TCP
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         # to prevent hanging forever
@@ -89,7 +232,7 @@ def scan_tcp_once(target_ip: str, port: int, *, timeout: float = 0.5) -> bool:
         return result == 0                          # True = open, False = not open
 
 
-def grab_banner(target_ip: str, port: int, timeout: float = 1.0) -> str | None:
+def grab_banner(target_ip: str, port: int, timeout: float = BANNER_TIMEOUT) -> str | None:
     """
     Try to connect and read a short 'banner' from a TCP service.
     Returns the banner text, or None if nothing is received quickly.
@@ -102,9 +245,10 @@ def grab_banner(target_ip: str, port: int, timeout: float = 1.0) -> str | None:
             # Send a small 'nudge', which can trigger banners on some services
             try:
                 # some common ports that HTTP/S usually use
-                if port in (80, 8080, 8000, 443, 8443):
+                if port in HTTP_BANNER_PORTS:
                     # send a safe HTTP request
-                    s.sendall(b"HEAD / HTTP/1.0\r\n\r\n")
+                    req = f"HEAD / HTTP/1.0\r\nHost: {target_ip}\r\nConnection: close\r\n\r\n"
+                    s.sendall(req.encode())
                 else:
                     # send a safe newline message
                     s.sendall(b"\r\n")
@@ -132,13 +276,14 @@ def check_port_with_banner(target_ip: str, port: int) -> tuple[bool, str | None]
     """
     Try to connect to a TCP port.
     If open, also try to grab a short banner.
-    Returns (is_open, banner) or None.
+    Returns (is_open, banner_or_None).
     """
     # 1) Use the simple TCP check
-    is_open = scan_tcp_once(target_ip, port, timeout=0.5)
+    is_open = scan_tcp_once(target_ip, port, timeout=TCP_CONNECT_TIMEOUT)
 
-    # 2) If open, try to read a benner (may still be None if service is quiet)
-    banner = grab_banner(target_ip, port, timeout=1.0) if is_open else None
+    # 2) If open, try to read a banner (may still be None if service is quiet)
+    banner = grab_banner(
+        target_ip, port, timeout=BANNER_TIMEOUT) if is_open else None
 
     # 3) Hand both results back to the caller
     return is_open, banner
@@ -151,7 +296,7 @@ def first_line(text: str | None) -> str:
     return text.splitlines()[0]
 
 
-def is_host_up_socket(ip: str, timeout: float = 0.4) -> bool:
+def is_host_up_socket(ip: str, timeout: float = TCP_CONNECT_TIMEOUT) -> bool:
     """
     Return True if the host appears alive based on TCP connect() behavior.
     Host is considered up if any probe returns:
@@ -179,6 +324,11 @@ def expand_ips(block: str) -> list[str]:
     - For larger blocks, use .hosts() to skip network/broadcast.
     """
     net = ipaddress.ip_network(block, strict=False)  # parse input as a network
+    if net.version != 4:
+        raise ValueError("IPv6 addresses are not supported by this scanner.")
+    if net.num_addresses > MAX_HOSTS + 2:  # +2 for network/broadcast
+        raise ValueError(
+            f"Network too large ({net.num_addresses} addresses). Try a smaller block.")
     if net.num_addresses == 1:  # e.g., '127.0.0.1' -> /32
         return [str(net.network_address)]
     return [str(ip) for ip in net.hosts()]  # iterate usable host IPs
@@ -190,13 +340,15 @@ def discover_live_hosts(block: str) -> list[str]:
     """
     ips = expand_ips(block)
     alive: list[str] = []
-    for ip in ips:
-        if is_host_up_socket(ip):
+    with ThreadPoolExecutor(max_workers=min(len(ips), MAX_WORKERS)) as ex:
+        results = list(ex.map(is_host_up_socket, ips, chunksize=64))
+    for ip, ok in zip(ips, results):
+        if ok:
             alive.append(ip)
     return alive
 
 
-def scan_udp_once(target_ip: str, port: int, payload: bytes | None = None, timeout: float = 1.0) -> tuple[str, str | None]:
+def scan_udp_once(target_ip: str, port: int, payload: bytes | None = None, timeout: float = UDP_TIMEOUT) -> tuple[str, str | None]:
     """
     Probe a UDP port once.
     Returns (status, reply_text or None) where status is one of:
@@ -235,144 +387,252 @@ def scan_udp_once(target_ip: str, port: int, payload: bytes | None = None, timeo
         return "open|filtered", None
 
 
-def scan_tcp_range(target_ip: str, low: int, high: int) -> list[int]:
+def _svc(port: int, proto: str) -> str | None:
+    try:
+        return socket.getservbyport(port, proto)
+    except OSError:
+        return None
+
+
+def scan_tcp_range(target_ip: str, low: int, high: int) -> list[tuple[int, str | None, str]]:
     """
-    Scan a TCP port range and print only open results.
-    Returns the list of open TCP ports.
+    Scan a TCP port range and print only OPEN results.
+    Returns rows: [(port, service, banner_first_line), ...]
     """
-    open_udp: list[int] = []
+    rows: list[tuple[int, str | None, str]] = []
     for port in range(low, high + 1):
         is_open, banner = check_port_with_banner(target_ip, port)
         if is_open:
-            line = f"OPEN   tcp/{port}"
+            svc = _svc(port, "tcp")
             fl = first_line(banner)
-            print(line if not fl else f"{line}  |  {fl}")
-            open_udp.append((port, fl))
-    return open_udp
+            line = f"OPEN   tcp/{port}" + (f" ({svc})" if svc else "")
+            print(line if not fl else f"{line}  |  {fl}", flush=True)
+            rows.append((port, svc, fl))
+    return rows
 
 
-def scan_tcp_range_threaded(target_ip: str, low: int, high: int, workers: int = MAX_WORKERS) -> list[tuple[int, str]]:
+def scan_tcp_range_threaded(target_ip: str, low: int, high: int, workers: int = MAX_WORKERS) -> list[tuple[int, str | None, str]]:
     """
     Concurrently scan [low, high] TCP ports.
     Prints OPEN lines (with first banner line) in sorted order.
-    Returns rows suitable for CSV: [(port, banner_first_line), ...]
+    Returns rows: [(port, service, banner_first_line), ...]
     """
-    def task(port: int) -> tuple[int, str] | None:
+    def task(port: int) -> tuple[int, str | None, str] | None:
         is_open, banner = check_port_with_banner(target_ip, port)
         if not is_open:
             return None
-        return (port, first_line(banner))
+        return (port, _svc(port, "tcp"), first_line(banner))
 
     # Kick off tasks
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        results = list(ex.map(task, range(low, high + 1)))
+        results = list(ex.map(task, range(low, high + 1), chunksize=64))
 
     # Keep only open ports; sort by port
     rows = [r for r in results if r is not None]
     rows.sort(key=lambda t: t[0])
 
     # Print clean output
-    for port, fl in rows:
-        line = f"OPEN   tcp/{port}"
-        print(line if not fl else f"{line}  |  {fl}")
+    for port, svc, fl in rows:
+        line = f"OPEN   tcp/{port}" + (f" ({svc})" if svc else "")
+        print(line if not fl else f"{line}  |  {fl}", flush=True)
 
     return rows
 
 
-def scan_udp_range(target_ip: str, low: int, high: int) -> list[int]:
+def scan_udp_range(target_ip: str, low: int, high: int) -> list[tuple[int, str | None, str]]:
     """
-    Scan a UDP port range and print only open results.
-    Returns the list of open UDP ports.
+    Scan a UDP port range and print only OPEN results.
+    Returns rows: [(port, service, banner_first_line), ...]
     """
-    open_rows: list[tuple[int, str]] = []
+    rows: list[tuple[int, str | None, str]] = []
     for port in range(low, high + 1):
-        status, reply = scan_udp_once(target_ip, port, timeout=1.0)
+        status, reply = scan_udp_once(target_ip, port, timeout=UDP_TIMEOUT)
         if status == "open":
+            svc = _svc(port, "udp")
             fl = first_line(reply)
-            print(
-                f"OPEN   udp/{port}" if not fl else f"OPEN   udp/{port}  |  {fl}")
-            open_rows.append(port)
+            line = f"OPEN   udp/{port}" + (f" ({svc})" if svc else "")
+            print(line if not fl else f"{line}  |  {fl}", flush=True)
+            rows.append((port, svc, fl))
         # ignore "closed" and "open|filtered" to keep output clean
-    return open_udp
+    return rows
 
 
-def save_csv(rows: list[tuple[int, str]], target_ip: str, started_iso: str, elapsed_s: float, protocol: str = "tcp") -> str:
+def scan_udp_range_threaded(target_ip: str, low: int, high: int, workers: int = MAX_WORKERS) -> list[tuple[int, str | None, str]]:
     """
-    rows: list of (port. banner_first_line)
+    Concurrently scan [low, high] UDP ports.
+    Prints OPEN lines (with first banner line) in sorted order.
+    Returns rows: [(port, service, banner_first_line), ...]
+    """
+    def task(port: int) -> tuple[int, str | None, str] | None:
+        status, reply = scan_udp_once(target_ip, port, timeout=UDP_TIMEOUT)
+        if status != "open":
+            return None
+        return (port, _svc(port, "udp"), first_line(reply))
+
+    # Kick off tasks
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        results = list(ex.map(task, range(low, high + 1), chunksize=64))
+
+    # Keep only open ports; sort by port
+    rows = [r for r in results if r is not None]
+    rows.sort(key=lambda t: t[0])
+
+    # Print clean output
+    for port, svc, fl in rows:
+        line = f"OPEN   udp/{port}" + (f" ({svc})" if svc else "")
+        print(line if not fl else f"{line}  |  {fl}", flush=True)
+
+    return rows
+
+
+def save_csv(rows: list[tuple[int, str | None, str]], target_ip: str, started_iso: str, elapsed_s: float, protocol: str = "tcp", target_name: str | None = None) -> str:
+    """
+    rows: list of (port, service, banner_first_line)
     Returns the filename written.
     """
-
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"scan_{target_ip}_{ts}.csv"
-
-    with open(filename, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        # header
-        w.writerow(["target_ip", "protocol", "port",
-                   "banner_first_line", "scan_started", "scan_elapsed_s"])
-        # rows
-        for port, fl in rows:
-            w.writerow([target_ip, protocol, port, fl,
-                       started_iso, f"{elapsed_s:.2f}"])
+    safe_name = re.sub(r'[^A-Za-z0-9._-]+', '_', (target_name or '').strip())
+    filename = f"scan_{target_ip}{('_' + safe_name) if safe_name else ''}_{ts}.csv"
+    try:
+        with open(filename, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            # header
+            w.writerow(["target_ip", "target_name", "protocol", "port", "service",
+                        "banner_first_line", "scan_started", "scan_elapsed_s"])
+            # rows
+            for port, svc, fl in rows:
+                w.writerow([target_ip, (target_name or ""), protocol, port, (svc or ""), fl,
+                            started_iso, f"{elapsed_s:.2f}"])
+    except OSError as e:
+        print(f"[!] Could not write results to '{filename}': {e}", flush=True)
+        return "(write_failed)"
     return filename
 
 
-def main() -> None:
-    # ---- input ----
-    user_target = input("Enter target (IP or hostname): ").strip()
-    try:
-        target_ip = resolve_target(user_target)
-        print(f"Target resolved to: {target_ip}")
-    except ValueError as err:
-        print(f"[!] {err}")
-        return
-
-    try:
-        low, high = parse_port_range(
-            input("Enter port range (e.g., 60-120): "))
-    except ValueError as err:
-        print(f"[!] {err}")
-        return
-
-    mode = input("Scan mode (tcp/udp): ").strip().lower()
-    if mode not in ("tcp", "udp"):
-        print("[!] Please enter 'tcp' or 'udp'.")
-        return
-
-    # ---- scan ----
-    print(f"[*] Scanning {mode.upper()} ports {low}-{high} on {target_ip} ...")
-    start = time.time()
+def run_scan_for_target(target_ip: str, low: int, high: int, mode: str, use_threads: bool, workers: int, target_name: str | None = None) -> None:
+    label = f"{target_ip}" if not target_name else f"{target_ip} ({target_name})"
+    print(
+        f"[*] Scanning {mode.upper()} ports {low}-{high} on {label} ...", flush=True)
+    start = time.perf_counter()
     started_iso = datetime.now().isoformat(timespec="seconds")
-    open_count = 0
-    results: list[tuple[int, str]] = []
+
+    # Clamp worker count to number of tasks (ports) and to at least 1
+    if use_threads:
+        total_tasks = max(1, high - low + 1)
+        workers = max(1, min(workers, total_tasks))
 
     if mode == "tcp":
-        if USE_THREADS:
-            rows = scan_tcp_range_threaded(
-                target_ip, low, high, workers=MAX_WORKERS)
-            open_count = len(rows)
-            if rows:
-                out_file = save_csv(
-                    rows, target_ip, started_iso, time.time() - start)
-                print(f"[*] Results saved to {out_file}")
+        rows = (scan_tcp_range_threaded(target_ip, low, high, workers)
+                if use_threads else
+                scan_tcp_range(target_ip, low, high))
+        protocol = "tcp"
+    else:  # udp
+        rows = (scan_udp_range_threaded(target_ip, low, high, workers)
+                if use_threads else
+                scan_udp_range(target_ip, low, high))
+        protocol = "udp"
 
-        else:
-            open_ports = scan_tcp_range(target_ip, low, high)
-    else:
-        open_ports = scan_udp_range(target_ip, low, high)
-
-    open_count = len(open_ports)
-    elapsed = time.time() - start
+    elapsed = time.perf_counter() - start
     total = high - low + 1
-    if open_count == 0:
-        print("No open {mode.upper()} ports in this range.")
-    if results:
-        out_file = save_csv(results, target_ip, started_iso, elapsed)
-        print(f"[*] Results saved to {out_file}")
+
+    if not rows:
+        print(f"No open {mode.upper()} ports in this range.", flush=True)
+    else:
+        out_file = save_csv(rows, target_ip, started_iso,
+                            elapsed, protocol=protocol, target_name=target_name)
+        print(f"[*] Results saved to {out_file}", flush=True)
 
     print(
-        f"[*] Done in {elapsed:.2f}s - scanned {total} {mode.upper()} ports - found {open_count} open.")
+        f"[*] Done in {elapsed:.2f}s - scanned {total} {mode.upper()} ports - found {len(rows)} open.", flush=True)
+
+
+def reverse_dns(ip: str) -> str | None:
+    try:
+        name, _, _ = socket.gethostbyaddr(ip)
+        return name
+    except (socket.herror, OSError):
+        return None
+
+
+def choose_scan_params() -> tuple[int, int, str, bool, int]:
+    low, high = prompt_port_range()
+    mode = prompt_mode()
+    use_threads, workers = prompt_threads(high - low + 1)
+    return low, high, mode, use_threads, workers
+
+
+def main() -> None:
+    # ---- optional live-host discovery ----
+    use_discovery = ask(
+        "Discover live hosts first? (y/n): ").strip().lower().startswith("y")
+    preselected_target: str | None = None
+    preselected_name: str | None = None
+    live: list[str] = []
+
+    if use_discovery:
+        block = prompt_discovery_block()
+        if block is None:
+            print("[*] Discovery skipped.", flush=True)
+        else:
+            live = discover_live_hosts(block)
+            if not live:
+                print(
+                    "[*] No live hosts found. Continuing with manual target entry.", flush=True)
+            elif len(live) == 1:
+                preselected_target = live[0]
+                preselected_name = reverse_dns(preselected_target)
+                if preselected_name:
+                    print(
+                        f"[*] Found 1 live host: {preselected_target} ({preselected_name})", flush=True)
+                else:
+                    print(
+                        f"[*] Found 1 live host: {preselected_target}", flush=True)
+            else:
+                print(f"[*] Found {len(live)} live hosts.", flush=True)
+
+    if preselected_target:
+        target_ip = preselected_target
+        print(f"Target selected: {target_ip}" +
+              (f" ({preselected_name})" if preselected_name else ""), flush=True)
+        low, high, mode, use_threads, workers = choose_scan_params()
+        run_scan_for_target(target_ip, low, high, mode,
+                            use_threads, workers, preselected_name)
+        return
+
+    if live and len(live) > 1:
+        # multi-host selection loop
+        already_done: set[str] = set()
+        while True:
+            to_scan = select_hosts(live, already_done)
+            if not to_scan:
+                break
+            low, high, mode, use_threads, workers = choose_scan_params()
+            for ip in to_scan:
+                name = reverse_dns(ip)
+                if name:
+                    print(f"Target selected: {ip} ({name})", flush=True)
+                else:
+                    print(f"Target selected: {ip}", flush=True)
+                run_scan_for_target(ip, low, high, mode,
+                                    use_threads, workers, name)
+                already_done.add(ip)
+
+            if len(already_done) == len(live):
+                print("[*] All live hosts scanned.", flush=True)
+                break
+            if not ask("Scan more hosts from the list? (y/n): ").strip().lower().startswith("y"):
+                break
+        return
+
+    # --- manual target path ----
+    target_ip, target_name = prompt_target_ip()
+    low, high, mode, use_threads, workers = choose_scan_params()
+    run_scan_for_target(target_ip, low, high, mode,
+                        use_threads, workers, target_name)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n[!] Interrupted by user. Exiting cleanly.", flush=True)
