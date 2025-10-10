@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Network Scanner
+Simple Port Scanner
 
 Author:     Tan Amos (s22)
 Institute:  Centre for Cybersecurity
@@ -1175,7 +1175,7 @@ def run_scan_for_target(
 def main() -> None:
     """Interactive entry point that guides the user through discovery and scanning."""
     # Friendly banner + reminder about ethics/permission.
-    print("\n=== Network Scanner ===")
+    print("\n=== Simple Port Scanner ===")
     print("by Tan Amos, Oct 2025\n")
     print("[!] Only scan hosts you have permission to test.\n")
 
