@@ -1,0 +1,55 @@
+name: Sync README from Notion
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  sync-readme:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Check required secrets exist
+        env:
+          NOTION_SECRET_CHECK: ${{ secrets.NOTION_SECRET }}
+          NOTION_DATABASE_CHECK: ${{ secrets.NOTION_DATABASE }}
+        run: |
+          test -n "$NOTION_SECRET_CHECK" || (echo "Missing NOTION_SECRET"; exit 1)
+          test -n "$NOTION_DATABASE_CHECK" || (echo "Missing NOTION_DATABASE"; exit 1)
+
+      - name: Export README from Notion
+        uses: victornpb/notion-jam@main
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NOTION_SECRET: ${{ secrets.NOTION_SECRET }}
+          NOTION_DATABASE: ${{ secrets.NOTION_DATABASE }}
+
+          FILTER_PROP: RepoKey
+          FILTER_VALUES: breachtrail
+
+          ARTICLE_PATH: README.md
+          ASSETS_PATH: ./assets/readme
+
+          PARALLEL_PAGES: 1
+          PARALLEL_DOWNLOADS_PER_PAGE: 3
+          DOWNLOAD_IMAGE_TIMEOUT: 30
+          SKIP_DOWNLOADED_IMAGES: true
+          DOWNLOAD_FRONTMATTER_IMAGES: true
+
+      - name: Remove Notion frontmatter from README
+        run: |
+          awk 'BEGIN{in_fm=0} NR==1 && $0=="---" {in_fm=1; next} in_fm && $0=="---" {in_fm=0; next} !in_fm {print}' README.md > README.tmp
+          mv README.tmp README.md
+
+      - name: Commit README changes
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: Sync README from Notion
+          file_pattern: README.md assets/readme/*
