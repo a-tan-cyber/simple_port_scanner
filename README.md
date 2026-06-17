@@ -1,529 +1,432 @@
 
-**Design and Development of an Automated Forensic Workflow for Memory and Disk Analysis Using Bash on Kali Linux**
+## **Centre for Cybersecurity Institute**
 
-***
+**Module:** Python Fundamentals
 
-Student Name: Tan Amos
+**Project 1:** Simple Port Scanner
 
-Student Code: s22
+**File Name:** CCK3\_250714.s22.pdf
 
-Class Code: CCK3\_250714
+**Student Name:** Tan Amos
 
-Institute: Centre for Cybersecurity
+**Class Code:** CCK3\_250714
 
-Trainer: Samson
+**Student Code:** s22
 
-***
+**Trainer Name: Samson**
 
-## 1. Introduction
+**Date of Submission:** 2025-10-17
 
-Project Breach Trail is a digital forensics and incident response (DFIR) automation exercise focused on building a single Bash-based workflow that can process a forensic evidence file in Kali Linux and generate a structured case output. The goal of the project is to reduce repetitive manual work during memory and data carving analysis while still preserving analyst-readable results, reproducibility, and clear reporting.
+## **Introduction**
 
-The submitted script was designed to automate five major tasks:
+This project involved creating a beginner-friendly network port scanner written in Python 3.10+. It discovers live hosts, scans TCP/UDP ports (optionally with threading), shows service names and quick banners, and saves results to CSV.
 
-*   memory analysis with **Volatility 2** and **Volatility 3**,
+### Project Goals
 
-*   carving with **Foremost** and **Bulk Extractor**,
+*   Learn to use Python's socket module.
 
-*   human-readable artifact hunting using **strings** and pattern matching,
+*   Understand the basics of port scanning and network security.
 
-*   result logging and report generation,
+*   Develop a simple tool to scan for open ports on a target system.
 
-*   packaging of the completed case folder into a ZIP archive.
+*   Understand the concept of open ports and why securing them is critical
 
-This report documents both the **intended workflow design** of the script and a **validated demonstration run** using the evidence file `dump2.mem`. The demonstration was performed against a suspected Windows memory image and the selected analysis path for that run was **Volatility 2**.
+### Key Features of the Port Scanner
 
-![](./assets/readme/3318F656-5DB4-4444-9F55-43E827D0CAD5_9VfLoH1t.png)
+*   Accept IP or hostname; optional live-host discovery
 
-***
+*   Scan TCP/UDP single ports or ranges
 
-## 2. Project Objectives
+*   Optional multithreading for speed
 
-The script was built to align with the project brief by performing the following core actions:
+*   Reverse DNS (show hostnames when available)
 
-*   verify the script is run as `root`,
+*   Quick banner grab (e.g., HTTP headers)
 
-*   prompt for an input evidence file and validate that it exists,
+*   Smarter UDP probes (DNS/NTP/SSDP)
 
-*   check whether the required forensic tools are installed,
+*   Optional RTT-based timeout auto-tuning
 
-*   test whether the memory image is analyzable with Volatility,
+*   Save results to CSV (timestamped)
 
-*   extract memory artifacts such as processes, network connections, command history, DLL listings, hashes, registry-related outputs, and SIDs,
-
-*   carve additional data automatically using multiple carving tools,
-
-*   search for readable artifacts such as usernames, passwords, emails, IP addresses, executables, DLLs, and suspicious strings,
-
-*   save results into a case directory,
-
-*   produce a report and results inventory,
-
-*   compress the final case output into a ZIP archive.
-
-***
-
-## 3. Environment, Evidence, and Tools
-
-### 3.1 Analysis Environment
-
-*   **Operating System:** Kali Linux
-
-*   **Primary automation language:** Bash
-
-*   **Main script:** `CCK3_250714.s22.sh`
-
-*   **Evidence used in validated run:** `dump2.mem`
-
-*   **Evidence type:** suspected Windows memory image
-
-*   **Input size:** 536,870,912 bytes (512 MB)
-
-### 3.2 Forensic Tools Used
-
-*   **Volatility 2**
-
-*   **Volatility 3**
-
-*   **Foremost**
-
-*   **Bulk Extractor**
-
-*   **strings**
-
-*   Standard shell utilities including `grep`, `find`, `stat`, `wc`, and `zip`
-
-### 3.3 Validated Demo Run Summary
-
-| Item                                     | Observed Result                                 |
-| ---------------------------------------- | ----------------------------------------------- |
-| Input file                               | `dump2.mem`                                     |
-| Case folder                              | `dump2_analysis_20260316_210034`                |
-| Selected memory workflow                 | Volatility 2                                    |
-| Volatility 2 suggested profile used      | `VistaSP1x86`                                   |
-| Other candidate profiles                 | `Win2008SP1x86`, `Win2008SP2x86`, `VistaSP2x86` |
-| Image timestamp recovered by `imageinfo` | 2014-01-08 17:54:20 UTC                         |
-| Analysis duration                        | 140 seconds                                     |
-| Total files created/found in case folder | 20,059                                          |
-| Final ZIP archive                        | `dump2_analysis_20260316_210034.zip`            |
-| Final ZIP size                           | 178M                                            |
-
-![](./assets/readme/FD2DCAD4-6569-4B84-BEA6-020409146560_CwrMgvML.png)
-
-***
-
-## 4. Script Design and Workflow
-
-### 4.1 Input Validation and Case Preparation
-
-The script first checks whether it is being run as `root`. It then prompts the user to enter an evidence filename and keeps prompting until a valid file is supplied. Once the file is accepted, the script creates a timestamped case folder using the input filename and analysis time.
-
-For the validated run, the case directory created was:
-
-`dump2_analysis_20260316_210034`
-
-Within this case folder, the script saves analysis outputs, carving results, strings results, registry hive dumps, report files, and the final packaged ZIP archive.
-
-### 4.2 Tool Detection and Readiness Checks
-
-Before analysis starts, the script checks whether the required tools are installed. It confirms the availability of `foremost`, `bulk_extractor`, and `strings`, and also attempts to detect working Volatility 2 and Volatility 3 launchers.
-
-The memory image is then tested with Volatility pre-checks:
-
-*   **Volatility 2:** `imageinfo`
-
-*   **Volatility 3:** `windows.info`
-
-In the validated run, both Volatility 2 and Volatility 3 pre-checks indicated that the image appeared analyzable. The demonstration then proceeded using **Volatility 2**.
-
-### 4.3 Memory Analysis Path
-
-The memory-analysis section of the script is designed to extract:
-
-*   running processes,
-
-*   network connections,
-
-*   executed commands,
-
-*   DLL listings,
-
-*   hashes,
-
-*   registry-related information,
-
-*   SIDs.
-
-For the Volatility 2 path, the script identifies a profile with `imageinfo`, stores it in a variable, and then runs:
-
-*   `pslist`
-
-*   `netscan` or `connscan` depending on profile suitability
-
-*   `cmdline`
-
-*   `cmdscan`
-
-*   `consoles`
-
-*   `dlllist`
-
-*   `hivelist`
-
-*   `hashdump`
-
-*   `getsids`
-
-*   `dumpregistry`
-
-This design is important because some command-history evidence is stronger in `cmdline` or `consoles` than in `cmdscan`, and hash extraction requires locating the correct SYSTEM and SAM hive offsets before invoking `hashdump`.
-
-### 4.4 Data Carving and Readable Artifact Hunting
-
-After memory analysis, the script performs automated carving using:
-
-*   **Foremost** for file-type based carving,
-
-*   **Bulk Extractor** for broad feature extraction, carved artifacts, and potential network recovery.
-
-The script then runs `strings` across the full input and filters the output into a second file that highlights likely artifacts of interest such as:
-
-*   passwords and credential-like strings,
-
-*   usernames and login-related terms,
-
-*   email addresses,
-
-*   IPv4 addresses,
-
-*   Windows executables and DLLs,
-
-*   other suspicious or investigation-relevant readable content.
-
-### 4.5 Reporting and Packaging
-
-At the end of the workflow, the script writes a structured `report.txt`, produces a detailed `results_inventory.txt`, records skips or warnings in `failures_skipped.txt`, and compresses the full case directory into a ZIP archive.
-
-This makes the output suitable for both grading and analyst review because the user receives:
-
-*   a readable report,
-
-*   a detailed manifest of saved files,
-
-*   a single packaged archive for submission or transfer.
-
-***
-
-## 5. Validated Execution Results
-
-### 5.1 Volatility Profile Identification
-
-The Volatility 2 `imageinfo` output suggested the following candidate profiles:
-
-*   `VistaSP1x86`
-
-*   `Win2008SP1x86`
-
-*   `Win2008SP2x86`
-
-*   `VistaSP2x86`
-
-The script selected and used **`VistaSP1x86`** for the actual Volatility 2 analysis path.
-
-### 5.2 Process Enumeration
-
-The saved `pslist` output showed an active Windows system with core operating system and service processes present. Representative examples include:
-
-*   `System`
-
-*   `smss.exe`
-
-*   `services.exe`
-
-*   `lsass.exe`
-
-*   `dns.exe`
-
-*   `snmp.exe`
-
-*   `ftpbasicsvr.exe`
-
-*   `explorer.exe`
-
-The process list indicates that the memory image belonged to a live Windows environment running multiple user and service components rather than a minimal or inactive memory state.
-
-![](./assets/readme/9194B220-1A44-403D-A3AE-A8284A0AB6C1_6olK4HlO.png)
-
-### 5.3 Network Connections
-
-The `netscan` output recovered multiple listening ports and service bindings. Examples visible in the run output include:
-
-*   **445/TCP**
-
-*   **3389/TCP**
-
-*   **53/TCP**
-
-*   **21/TCP**
-
-*   **8080/TCP**
-
-*   **161/UDP**
-
-*   **135/TCP**
-
-The address **192.168.119.191** also appeared in the recovered network data, confirming that the image contained meaningful network state rather than only local process metadata.
-
-These results support the conclusion that the memory image retained recoverable service exposure and network configuration information relevant to incident response and host profiling.
-
-![](./assets/readme/721EB953-8C80-4D29-B6ED-A18A9FC1B0F3_VA373kXi.png)
-
-### 5.4 Command History and User Activity
-
-The script attempted `cmdline`, `cmdscan`, and `consoles` to maximize the chance of recovering executed command artifacts.
-
-In this run, the most useful evidence came from `cmdline` and `consoles`. The recovered console history showed interactive administrative commands such as:
-
-*   `net user waldo qwerty`
-
-*   `net user /?`
-
-*   `net user waldo qwerty /add`
-
-*   `net user YOUR-NAME letmein /add`
-
-*   `net user waldo Apple123 /add`
-
-*   `net user YOUR-NAME SuperSecret! /add`
-
-This is significant because it demonstrates that the memory image preserved clear evidence of user-management activity, including account-creation attempts and successful additions from an administrator session.
-
-![](./assets/readme/84CD5491-AC15-44A5-A76A-B9BD58DB661C_0r9ZQach.png)
-
-![](./assets/readme/8EE06EAE-13E2-4B72-8E5B-02E390A6AD91_JZycX5K8.png)
-
-### 5.5 Hashes, Registry Data, and SIDs
-
-The script successfully recovered account hashes using `hashdump`. The output included hashes for the following accounts:
-
-*   `Administrator`
-
-*   `Guest`
-
-*   `student`
-
-*   `probe`
-
-*   `waldo`
-
-*   `YOUR-NAME`
-
-This is a strong DFIR outcome because it confirms that the workflow can move beyond simple process listing and recover identity-related and credential-related artifacts from memory.
-
-The script also dumped **13 registry hive files**, including key hives such as:
-
-*   `SYSTEM`
-
-*   `SAM`
-
-*   `SOFTWARE`
-
-*   `SECURITY`
-
-*   `COMPONENTS`
-
-*   `DEFAULT`
-
-*   `BCD`
-
-*   multiple `NTUSERDAT` hives
-
-*   `UsrClassdat`
-
-In addition, the script saved SIDs output to `vol2_getsids.txt`, allowing account-to-SID review as part of the case evidence.
-
-![](./assets/readme/DA0740DE-7BAD-4550-AAE6-DD6173B045DA_p13op5OQ.png)
-
-***
-
-## 6. Carving and Human-Readable Artifact Recovery
-
-### 6.1 Foremost Results
-
-The Foremost stage created **841 regular files**. Based on the run inventory, the main recovered file categories were:
-
-*   **487 DLL files**
-
-*   **128 EXE files**
-
-*   **101 HTM files**
-
-*   **47 GIF files**
-
-*   **39 PNG files**
-
-*   **24 BMP files**
-
-*   **10 JPG files**
-
-*   **4 AVI files**
-
-This indicates that the memory image contained a meaningful quantity of recoverable Windows program and presentation artifacts.
-
-### 6.2 Bulk Extractor Results
-
-Bulk Extractor generated **19,183 regular files** in the case folder. Notable categories observed in the inventory included:
-
-*   **11,190** **`evtx_carved`** **artifacts**
-
-*   **4,456** **`ntfsmft_carved`** **artifacts**
-
-*   **1,427** **`ntfsusn_carved`** **artifacts**
-
-*   **916** **`winpe_carved`** **artifacts**
-
-*   **571** **`ntfslogfile_carved`** **artifacts**
-
-*   **560** **`ntfsindx_carved`** **artifacts**
-
-The run also created a recovered network capture file:
-
-*   `dump2_analysis_20260316_210034/bulk_extractor/packets.pcap`
-
-*   size: **1.2M**
-
-This is useful because the case package includes a discrete network artifact that can be examined later in Wireshark or another packet-analysis tool.
-
-![](./assets/readme/A5B23843-D512-4261-9F12-385FD75E3267_EUXMKnfi.png)
-
-### 6.3 Strings and Filtered Readable Artifacts
-
-The full strings output was written to `strings/all_strings.txt`, and the filtered investigation-focused output was written to `strings/strings_of_interest.txt`.
-
-The validated run produced **60,096 strings-of-interest hits**. These hits included numerous readable references to:
-
-*   `.exe` and `.dll` files,
-
-*   usernames and user-management terms,
-
-*   password and credential-related text,
-
-*   IPv4 addresses,
-
-*   email-like strings,
-
-*   administrator-related terms.
-
-The strings stage is useful for triage because it quickly surfaces likely human-meaningful artifacts without requiring the analyst to manually review the full raw strings output.
-
-***
-
-## 7. Output Structure and Case Deliverables
-
-The validated run produced a case folder containing the main memory-analysis files, carving directories, strings outputs, registry hive dumps, and reporting files. A simplified view of the saved structure is shown below:
+## Script Logic
 
 ```plain text
-Project case folder
-└── dump2_analysis_20260316_210034/
-    ├── report.txt
-    ├── results_inventory.txt
-    ├── failures_skipped.txt
-    ├── vol2_imageinfo.txt
-    ├── vol2_pslist.txt
-    ├── vol2_netscan.txt
-    ├── vol2_cmdline.txt
-    ├── vol2_cmdscan.txt
-    ├── vol2_consoles.txt
-    ├── vol2_dlllist.txt
-    ├── vol2_hivelist.txt
-    ├── vol2_hashdump.txt
-    ├── vol2_getsids.txt
-    ├── vol2_dumpregistry_log.txt
-    ├── registry_hives/
-    ├── foremost/
-    ├── bulk_extractor/
-    └── strings/
+Inputs (target, ports, tcp/udp, threads)
+│
+├─ Optional Discovery (CIDR) → discover_live_hosts() → is_host_reachable()
+│
+└─ For each target:
+    ├─ (Optional) RTT auto-tune → estimate_rtt_s() → compute_timeouts_from_rtt()
+    ├─ Scan:
+    │   ├─ TCP → probe_tcp_port() → [banner if HTTP] → get_service_name()
+    │   └─ UDP → probe_udp_port() → (open / closed / open|filtered)
+    ├─ Reverse DNS label (best-effort) → reverse_dns()
+    └─ Save → write_results_csv()  (target, proto, port, service, banner, timestamp)
 ```
 
-### 7.1 Key Output Files
+*   **Discovery:** Tries quick TCP/UDP reachability to list “live” hosts before scanning.
 
-| Output                                   | Purpose                                              |
-| ---------------------------------------- | ---------------------------------------------------- |
-| `report.txt`                             | human-readable execution summary and case statistics |
-| `results_inventory.txt`                  | file-by-file inventory of generated case outputs     |
-| `failures_skipped.txt`                   | warnings and skipped items recorded during execution |
-| `vol2_imageinfo.txt`                     | profile detection and image metadata                 |
-| `vol2_pslist.txt`                        | recovered process list                               |
-| `vol2_netscan.txt`                       | network connections and listening ports              |
-| `vol2_cmdline.txt` / `vol2_consoles.txt` | command and console activity                         |
-| `vol2_hashdump.txt`                      | extracted account hashes                             |
-| `vol2_getsids.txt`                       | SID extraction output                                |
-| `registry_hives/`                        | dumped registry hive files                           |
-| `bulk_extractor/packets.pcap`            | recovered packet capture artifact                    |
-| `strings/strings_of_interest.txt`        | filtered readable-artifact hits                      |
+*   **RTT auto-tune:** Measures median round-trip time and adjusts timeouts so slow links still complete.
 
-### 7.2 Recorded Skip / Warning State
+*   **TCP banners:** Sends a tiny HTTP `HEAD` on webish ports; for others, a harmless newline to coax banners.
 
-Only one skip was recorded in the validated run:
+*   **UDP reality:** No handshake; “no reply” often means **open|filtered**. Known probes (DNS/NTP/SSDP) improve accuracy.
 
-*   `connscan` was skipped because `VistaSP1x86` is a profile where `netscan` is the profile-appropriate plugin.
+*   **Threading:** Uses a thread pool for I/O-bound scans to speed things up without hammering the host.
 
-This is a controlled and expected skip rather than an execution failure.
-
-![](./assets/readme/6DFC5594-4AE4-41FC-962C-2C67FD12707B_aB051QUD.png)
+*   **CSV output:** Safe for spreadsheets (formula-injection guarded) and easy to compare runs over time.
 
 ***
 
-## 8. Discussion
+***
 
-The validated run shows that the script achieved the main purpose of Project Breach Trail: it converted a single input evidence file into a structured forensic case package with memory-analysis outputs, carved artifacts, readable-string triage, registry data, hashes, SIDs, and a compressed archive.
+## Lab Demonstration
 
-From an engineering perspective, the script is useful because it combines:
+> **Legal / Ethical Use**
 
-*   analyst-facing output previews,
+    Only scan systems you own or have written permission to test. Public targets listed here are safe to use for learning; do not scan random hosts on the internet
 
-*   automatically saved result files,
+## Setup
 
-*   multiple complementary carving methods,
+I intentionally exposed a small set of ports so my scanner has something legitimate to find. Everything else was kept closed/blocked.
 
-*   both Volatility 2 and Volatility 3 support in the design,
+### Ubuntu Server — SSH, HTTP, and UDP
 
-*   a final packaged deliverable suitable for submission or later review.
+**Enable SSH (port 22)**
 
-From an investigation perspective, the `dump2.mem` run was especially valuable because it recovered not only generic operating system artifacts, but also user-management command history, listening services, packet capture output, dumped registry hives, and local account hashes.
+**Why:** secure remote login; common baseline service to scan.
+
+```bash
+sudo apt update
+sudo apt install -y openssh-server
+sudo systemctl enable --now ssh
+```
+
+**Enable HTTP (port 80)**
+
+**Why:** easy banner to grab (HTTP headers) for demo.
+
+```bash
+sudo apt install -y apache2
+sudo systemctl enable --now apache2
+```
+
+**UDP (port 1900)**
+
+**Why:** show a UDP “open” with a short banner reply (SSDP-style).
+
+```bash
+sudo python3 - <<'PY'
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(('0.0.0.0', 1900))
+print("UDP 1900 demo running… (Ctrl+C to stop)")
+while True:
+    data, addr = s.recvfrom(1024)
+    s.sendto(b'HTTP/1.1 200 OK\r\nSERVER: lab-ssdp-demo\r\n\r\n', addr)
+PY
+```
+
+**Verification:**
+
+**Screenshot — Ubuntu: SSH (22) and HTTP (80) listening**.
+
+![](./assets/readme/02_ubuntu_listening_vhOt17mb.png)
+
+Screenshot - Ubuntu: UDP on port 1900
+
+![](./assets/readme/image_TM3IG1a9.png)
+
+**Screenshot — Ubuntu target reachable (SSH 22 & HTTP 80)**
+
+![](./assets/readme/03_ubuntu_ports_lhazdTW2.png)
+
+## **Windows 10 — RDP and SMB**
+
+**Why:** realistic Windows services to detect.
+
+> Run the following in CMD as Administrator.
+
+**Enable RDP (port 3389)**
+
+```shell
+rem Start/enable Remote Desktop Services 
+sc config TermService start= auto
+sc start TermService
+
+rem Open the firewall 
+netsh advfirewall firewall add rule name="Lab Allow RDP 3389" dir=in action=allow protocol=TCP localport=3389
+
+```
+
+**Enable SMB file sharing (port 445)**
+
+```shell
+rem Start/enable the Server (SMB) service
+sc config lanmanserver start= auto
+sc start lanmanserver
+
+rem Open the firewall 
+netsh advfirewall firewall add rule name="Lab Allow SMB 445" dir=in action=allow protocol=TCP localport=445
+```
+
+**Verification:**
+
+**Screenshot — Windows: RDP (3389) & SMB (445) allowed + listening**
+
+![](./assets/readme/05_windows_localproof_LS9w01DT.png)
+
+**Screenshot — Windows target reachable (RDP 3389 & SMB 445)**
+
+![](./assets/readme/04_windows_ports_IekIE5eX.png)
+
+### Summary
+
+| Host          | Role     | IP              | Open Ports     |
+| ------------- | -------- | --------------- | -------------- |
+| Kali Linux    | Scanner  | 192.168.114.129 | —              |
+| Ubuntu Server | Target A | 192.168.114.130 | TCP 22 (SSH)   |
+| TCP 80 (HTTP) |          |                 |                |
+| UDP 1900      |          |                 |                |
+| Windows 10    | Target B | 192.168.114.128 | TCP 3389 (RDP) |
+| TCP 445 (SMB) |          |                 |                |
+
+**Screenshot — Launching the Script**
+
+![](./assets/readme/01_launch_fOOb5zon.png)
+
+## Usage — Discovery on /24 then TCP Scan
+
+**Goal:** Discover hosts on my lab subnet (`192.168.114.0/24`) and scan the four ports I enabled.
+
+**Inputs**
+
+*   `Discover live hosts first?` → **y**
+
+*   `Enter IP or CIDR` → **192.168.114.0/24**
+
+*   `Use threads for discovery (hosts)?` → **y** → workers: **ENTER**
+
+*   `Resolve reverse DNS for live hosts in the list?` → **n**
+
+*   `Select hosts (e.g., 1-3,5 or 'all')` → **4, 2** (to select 192.168.114.130 and .128)
+
+*   `Enter ports/ranges` → **22, 80, 445, 3389**
+
+*   `Scan mode` → **tcp**
+
+*   `Use threads for scanning (ports)?` → **y** → workers: **ENTER**
+
+*   `Enable RTT-based autotuning of timeouts?` → n
+
+**Outputs**
+
+*   Ubuntu (192.168.114.130): **OPEN** on **22 (ssh)** and **80 (http)** with an HTTP header banner.
+
+*   Windows (192.168.114.128): **OPEN** on **445 (microsoft-ds)** and **3389 (ms-wbt-server)**.
+
+**Screenshot — Discovery (/24) + TCP scan (Ubuntu & Windows)**
+
+![](./assets/readme/06_scan_tcp_2BNNuvOh.png)
+
+## Usage — UDP Scan
+
+**Goal:** Scan common UDP services and confirm my custom UDP responder on port **1900** returns a banner.
+
+**Inputs**
+
+*   `Discover live hosts first?` → **n**
+
+*   `Enter target` → **192.168.114.130**
+
+*   `Enter ports/ranges` → **53, 123, 1900**
+
+*   `Scan mode` → **udp**
+
+*   `Use threads for scanning (ports)?` → **y** → workers: **ENTER**
+
+*   `Enable RTT-based auto-tuning of timeouts?` → **n**
+
+*   `Also show non-open UDP results (CLOSED / OPEN|FILTERED)?` → **y**
+
+**Outputs**
+
+*   Ubuntu (192.168.114.130): **OPEN** on **udp/1900 (ssdp)** with a short banner (e.g., `HTTP/1.1 200 OK`).
+
+*   UDP **53** and **123**: shown as **OPEN|FILTERED** or **CLOSED** (no banner), demonstrating typical UDP ambiguity.
+
+**Screenshot — UDP scan (1900 open with banner; 53/123 non-open)**
+
+![](./assets/readme/image_mmZledi5.png)
+
+## Usage — TCP Banner & CSV Output (Ubuntu http/80)
+
+**Goal:** Show a readable banner on TCP 80 and confirm results are saved to CSV.
+
+**Inputs**
+
+*   `Discover live hosts first?` → **n**
+
+*   `Enter target` → **192.168.114.130**
+
+*   `Enter ports/ranges` → **80**
+
+*   `Scan mode` → **tcp**
+
+*   `Enable RTT-based auto-tuning of timeouts?` → **n**
+
+**Outputs**
+
+*   `OPEN tcp/80 (http) | ...` (first HTTP header line as the banner)
+
+*   `[*] Results saved to scan_192.168.114.130_<timestamp>.csv`
+
+**Screenshot — TCP banner on 80 + CSV saved**
+
+![](./assets/readme/image_LrB94nCB.png)
+
+![](./assets/readme/image_dq2yxOKo.png)
+
+## Usage — Public Targets, RTT auto-tuning, Multithreading
+
+Only scan hosts that explicitly permit it.
+
+*   [**scanme.nmap.org**](http://scanme.nmap.org/) — Allowed for light port-scanning only (no exploits/DoS). Limit yourself to a few scans per day.
+
+*   [**portquiz.net**](http://portquiz.net/) — Listens on **all TCP ports** to help test outbound connectivity; use a tiny subset of ports (e.g., 80, 8080, 12345).
+
+### Demo 1 — [scanme.nmap.org](http://scanme.nmap.org/)
+
+**Goal:** Show a lightweight public scan, demonstrate RTT-based auto-tuning, multithreading, and repeated scans on the same host.
+
+> Start a fresh run of the script so the auto-tuning prompt appears.
+
+**Inputs**
+
+*   `Discover live hosts first?` → **n**
+
+*   `Enter target` → [**scanme.nmap.org**](http://scanme.nmap.org/)
+
+*   `Enter ports/ranges` → 1-100
+
+*   `Scan mode` → **tcp**
+
+*   `Use threads for scanning (ports)?` → (1st run) **n , (2nd run) y** → 50 workers
+
+*   `Enable RTT-based auto-tuning of timeouts?` → **y**
+
+*   `Scan the same host again with different settings?` → **y**
+
+**Outputs**
+
+*   `[*] RTT auto-tune: RTT≈<X>ms -> TCP=<a>s, Banner=<b>s, UDP=<c>s`
+
+*   A few **OPEN** lines (varies over time), and
+
+*   Significantly faster 2nd run (with multithreads) than 1st
+
+**Screenshot — Public scan (**[**scanme.nmap.org**](http://scanme.nmap.org/)**, auto-tuned)**
+
+![](./assets/readme/image_XYCYm6v7.png)
+
+### Demo 2 — [portquiz.net](http://portquiz.net/)
+
+**Goal:** Confirm banners on arbitrary TCP ports and (if prompted) keep auto-tuning enabled.
+
+**Inputs**
+
+*   `Discover live hosts first?` → **n**
+
+*   `Enter target` → [**portquiz.net**](http://portquiz.net/)
+
+*   `Enter ports/ranges` → **1-65535**
+
+*   `Scan mode` → **tcp**
+
+*   `Use threads for scanning (ports)?` → **y** → workers: **ENTER**
+
+*   `Enable RTT-based auto-tuning of timeouts?` → **y** *(only if prompted; it’s asked once per run)*
+
+**Outputs**
+
+*   **OPEN** on some ports, with short HTTP banner.
 
 ***
 
-## 9. Conclusion
+## Limitations
 
-Project Breach Trail successfully demonstrates a Bash-based forensic workflow for Kali Linux that automates both memory analysis and data carving while preserving readable outputs for the analyst. In the validated run against `dump2.mem`, the workflow:
+*   **IPv4-only.** The scanner rejects IPv6 input and skips AAAA records.
 
-*   identified a workable Windows memory profile,
+*   **Connect scans only.** Uses full TCP `connect()`; no SYN/half-open scanning (needs raw sockets).
 
-*   recovered processes, network state, command-history evidence, hashes, SIDs, and registry hives,
+*   **UDP ambiguity.** Anything without a reply becomes **open|filtered**; only a few smart probes (DNS/NTP/SSDP) are implemented.
 
-*   carved a large number of artifacts using Foremost and Bulk Extractor,
+*   **Tight timeouts can miss slow hosts.** Auto-tuning helps, but false negatives are still possible on noisy/slow links.
 
-*   located a recoverable `packets.pcap` file,
+*   **Basic banner grab.** No TLS handshake or protocol-specific parsing beyond minimal HTTP; limited service fingerprinting.
 
-*   generated a large filtered strings artifact set,
+*   **Interactive CLI.** Prompts are great for learning, but not ideal for automation/CI.
 
-*   saved the full case into a structured directory,
+*   **Single-run CSV only.** No JSON output, HTML report, or side-by-side diff between runs.
 
-*   produced a final ZIP archive for packaging and submission.
+*   **No evasion/rate limiting.** Doesn’t adapt to IDS/IPS or throttle automatically.
 
-Overall, the script provides a practical and reproducible foundation for basic DFIR triage and aligns well with the core requirements of the project brief.
+*   **No OS/version detection.** Doesn’t do stack fingerprinting or full service detection.
+
+**Potential next features**
+
+*   **IPv6 support** and dual-stack resolution.
+
+*   **SYN scan mode** (e.g., via `scapy`/raw sockets) + privileged fallback.
+
+*   **Richer UDP probes** (SNMP/161, TFTP/69, DHCP/67, etc.) and retry/backoff logic.
+
+*   **Config profiles** (`-fast`, `-full`, `-top-1000`) and an **exclusion list**.
+
+*   **Machine-readable outputs** (JSON), plus **HTML/PDF** summary and **diff reports** between runs.
+
+*   **Rate limiting** and polite delays; optional **randomized port order**.
+
+*   **Headless mode/CLI flags** (no prompts) for scripting and CI pipelines.
 
 ***
 
-## 10. References
+## Conclusion
 
-*   Volatility Foundation. *Volatility Command Reference*. <https://github.com/volatilityfoundation/volatility/wiki/command-reference>
+This project taught me the mechanisms behind network scanners:
 
-*   Volatility 3 Documentation. <https://volatility3.readthedocs.io/en/latest/>
+*   I used Python’s **socket** API to perform **TCP connect** and **UDP probe** scans.
 
-*   Bulk Extractor Wiki. <https://github.com/simsong/bulk_extractor/wiki>
+*   I practiced **parsing inputs** (ports/ranges, CIDR), **reverse DNS**, and mapping ports to **well-known services**.
 
-*   Foremost. <https://foremost.sourceforge.net/>
+*   I saw why **UDP is tricky** (no handshake; many services don’t reply) and how small, protocol-aware probes improve accuracy.
+
+*   I implemented a simple **banner grab** to turn raw ports into human-friendly results.
+
+*   I added **CSV output** safely (formula-injection guarded) to make results useful outside the terminal.
+
+*   I experimented with **multithreading** and a basic **RTT-based auto-tuning** to balance speed vs. reliability.
+
+*   Most importantly, I built good **security hygiene**: enable only the services I intend to expose, verify from multiple angles, and respect ethical boundaries when scanning.
+
+I now understand the mechanics and trade-offs of port scanning and can explain why tools like Nmap behave the way they do. The next steps above would move this from a learning tool toward a more production-grade scanner.
+
+**End of Report**
 
 ***
+
+## References
+
+| \[1]  | Infosec, “Write a port scanner in Python in 5 minutes,” YouTube video. Accessed: Oct. 17, 2025. \[Online]. Available: [https://www.youtube.com/watch?v=t9EX2RAUoTU](https://www.youtube.com/watch?v=t9EX2RAUoTU\&utm_source=chatgpt.com) [YouTube](https://www.youtube.com/watch?v=t9EX2RAUoTU\&utm_source=chatgpt.com)                                                                                         |
+| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| \[2]  | D. Bombal, “Python nmap port scanner,” YouTube video. Accessed: Oct. 17, 2025. \[Online]. Available: [https://www.youtube.com/watch?v=x4AE5yOF9pE](https://www.youtube.com/watch?v=x4AE5yOF9pE\&utm_source=chatgpt.com) [YouTube](https://www.youtube.com/watch?v=x4AE5yOF9pE\&utm_source=chatgpt.com)                                                                                                          |
+| \[3]  | D. Bombal, “pythonvideos” (code examples), GitHub repository. Accessed: Oct. 17, 2025. \[Online]. Available: [https://github.com/davidbombal/pythonvideos](https://github.com/davidbombal/pythonvideos?utm_source=chatgpt.com) [GitHub](https://github.com/davidbombal/pythonvideos?utm_source=chatgpt.com)                                                                                                     |
+| \[4]  | Python Software Foundation, “socket — Low-level networking interface,” *Python 3 Standard Library*. Accessed: Oct. 17, 2025. \[Online]. Available: [https://docs.python.org/3/library/socket.html](https://docs.python.org/3/library/socket.html?utm_source=chatgpt.com) [Python documentation](https://docs.python.org/3/library/socket.html?utm_source=chatgpt.com)                                           |
+| \[5]  | Python Software Foundation, “Socket Programming HOWTO,” *Python 3 Docs*. Accessed: Oct. 17, 2025. \[Online]. Available: [https://docs.python.org/3/howto/sockets.html](https://docs.python.org/3/howto/sockets.html?utm_source=chatgpt.com) [Python documentation](https://docs.python.org/3/howto/sockets.html?utm_source=chatgpt.com)                                                                         |
+| \[6]  | Real Python, “Socket Programming in Python (Guide),” Dec. 7, 2024. Accessed: Oct. 17, 2025. \[Online]. Available: [https://realpython.com/python-sockets/](https://realpython.com/python-sockets/?utm_source=chatgpt.com) [Real Python](https://realpython.com/python-sockets/?utm_source=chatgpt.com)                                                                                                          |
+| \[7]  | Python Software Foundation, “ipaddress — IPv4/IPv6 manipulation library,” *Python 3 Standard Library*. Accessed: Oct. 17, 2025. \[Online]. Available: [https://docs.python.org/3/library/ipaddress.html](https://docs.python.org/3/library/ipaddress.html?utm_source=chatgpt.com) [Python documentation](https://docs.python.org/3/library/ipaddress.html?utm_source=chatgpt.com)                               |
+| \[8]  | Python Software Foundation, “concurrent.futures — Launching parallel tasks,” *Python 3 Standard Library*. Accessed: Oct. 17, 2025. \[Online]. Available: [https://docs.python.org/3/library/concurrent.futures.html](https://docs.python.org/3/library/concurrent.futures.html?utm_source=chatgpt.com) [Python documentation](https://docs.python.org/3/library/concurrent.futures.html?utm_source=chatgpt.com) |
+| \[9]  | Nmap Project, “Go ahead and ScanMe!” (public target usage policy). Accessed: Oct. 17, 2025. \[Online]. Available: [https://scanme.nmap.org/](https://scanme.nmap.org/?utm_source=chatgpt.com) [scanme.nmap.org](https://scanme.nmap.org/?utm_source=chatgpt.com)                                                                                                                                                |
+| \[10] | Portquiz.net, “This server listens on all TCP ports.” Accessed: Oct. 17, 2025. \[Online]. Available: [https://portquiz.net/](https://portquiz.net/?utm_source=chatgpt.com) [portquiz.net](https://portquiz.net/?utm_source=chatgpt.com)                                                                                                                                                                         |
+| \[11] | Python Wiki, “UDP Communication.” Accessed: Oct. 17, 2025. \[Online]. Available: [https://wiki.python.org/moin/UdpCommunication](https://wiki.python.org/moin/UdpCommunication?utm_source=chatgpt.com) [Python Wiki](https://wiki.python.org/moin/UdpCommunication?utm_source=chatgpt.com)                                                                                                                      |
